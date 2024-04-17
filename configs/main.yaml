@@ -1,0 +1,72 @@
+# @package _global_
+
+user: ${oc.env:USER}
+resume: ""
+device: 0
+video: False
+num_eval_episodes: 5
+dm_control: True
+env: cheetah_run
+wandb: False
+from_pixels: True
+pixels_width: 64
+action_repeat: 2
+batch_size: 50
+batch_length: 50
+train_steps: 100
+eval_every: 10000
+seed: 0
+formal_save: False
+
+# Online Decision Transformer specific settings
+max_episode_length: 1000
+state_dim: 17  # Example, set according to your environment
+action_dim: 6   # Example, set according to your environment
+model_lr: 1e-4
+value_lr: 1e-4
+actor_lr: 1e-4
+K: 20  # Sequence length for transformer
+embed_dim: 256  # Embedding dimension for transformer
+n_layer: 3  # Number of layers in the transformer
+n_head: 4  # Number of heads in the transformer
+activation_function: 'relu'
+dropout: 0.1
+
+# Creating POMDP (if applicable)
+flicker: 0.
+noise: 0.
+missing: 0.
+
+# Training configuration
+init_temperature: 0.1
+learning_rate: 1e-4
+weight_decay: 5e-4
+warmup_steps: 10000
+max_pretrain_iters: 1000
+num_updates_per_pretrain_iter: 500
+max_online_iters: 1500
+online_rtg: 7200
+num_online_rollouts: 1
+replay_size: 1000
+num_updates_per_online_iter: 300
+eval_interval: 10
+
+# Cluster settings
+ngpus: 1
+partt: learnlab  # or devlab
+
+hydra:
+  run:
+    dir: ./outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}
+  sweep:
+    dir: /checkpoint/${user}/RL-LVM/dreamer/${now:%Y.%m.%d}/${now:%H.%M.%S}
+    subdir: ${hydra.job.override_dirname}
+  
+  launcher:
+    max_num_timeout: 100000
+    timeout_min: 4319
+    partition: ${partt}
+    mem_gb: 64
+    cpus_per_task: 10
+    gpus_per_node: ${ngpus}
+

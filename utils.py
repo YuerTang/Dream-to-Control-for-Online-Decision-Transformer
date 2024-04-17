@@ -1,66 +1,35 @@
-import time
-import datetime
-from contextlib import contextmanager
-from torch import nn, Tensor
+"""
+Copyright (c) Meta Platforms, Inc. and affiliates.
+
+This source code is licensed under the CC BY-NC license found in the
+LICENSE.md file in the root directory of this source tree.
+"""
+
+import random
 import torch
 import numpy as np
+from pathlib import Path
 
 
-class AttrDict(dict):
-
-  __setattr__ = dict.__setitem__
-  __getattr__ = dict.__getitem__
-
-
-class AverageMeter:
-    def __init__(self):
-        self.reset_states()
-
-    def reset_states(self):
-        self.total = 0.0
-        self.count = 0
-
-    def update_state(self, scalar):
-        if isinstance(scalar, Tensor):
-            scalar = scalar.item()
-        self.total += scalar
-        self.count += 1
-
-    def result(self):
-        return self.total / self.count
-
-class Timer:
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.start_time = time.perf_counter()
-        self.last_time = time.perf_counter()
-
-    def split(self):
-        elapsed_time = time.perf_counter() - self.last_time
-        self.last_time = time.perf_counter()
-        return elapsed_time
-
-    def total(self) -> float:
-        return time.perf_counter() - self.start_time
-
-    def total_human(self) -> str:
-        return str(datetime.timedelta(seconds=self.total()))
+def set_seed_everywhere(seed):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
 
-@contextmanager
-def freeze(module: nn.Module):
+def to_np(t):
     """
-    Disable gradient for all module parameters. However, if input requires grad
-    the graph will still be constructed.
+    convert a torch tensor to a numpy array
     """
-    try:
-        prev_states = [p.requires_grad for p in module.parameters()]
-        for p in module.parameters():
-            p.requires_grad_(False)
-        yield
-        
-    finally:
-        for p, state in zip(module.parameters(), prev_states):
-            p.requires_grad_(state)
+    if t is None:
+        return None
+    elif t.nelement() == 0:
+        return np.array([])
+    else:
+        return t.cpu().detach().numpy()
+
+
+def mkdir(path):
+    Path(path).mkdir(parents=True, exist_ok=True)

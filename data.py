@@ -137,7 +137,7 @@ def create_dataloader(
     state_std,
     reward_scale,
     action_range,
-    num_workers=8, #24
+    num_workers=24,
 ):
     # total number of subt-rajectories you need to sample
     sample_size = batch_size * num_iters

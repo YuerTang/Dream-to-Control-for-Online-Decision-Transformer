@@ -7,14 +7,14 @@ LICENSE.md file in the root directory of this source tree.
 
 from datetime import datetime
 import os
-import util
+import utils
 
 
 class Logger:
     def __init__(self, variant):
 
         self.log_path = self.create_log_path(variant)
-        util.mkdir(self.log_path)
+        utils.mkdir(self.log_path)
         print(f"Experiment log path: {self.log_path}")
 
     def log_metrics(self, outputs, iter_num, total_transitions_sampled, writer):
