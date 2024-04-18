@@ -468,8 +468,7 @@ class Workspace:
 
             self.pretrain_iter += 1
         
-        # Print the model parameters after pretraining
-        self.print_parameters(self.model)
+       
 
     def evaluate_odt(self, eval_fns):
         eval_start = time.time()
@@ -546,11 +545,7 @@ class Workspace:
         )
         while self.online_iter < self.variant["max_online_iters"]:
 
-            # existing tuning loop code...
-            if (self.online_iter + 1) % self.variant["eval_interval"] == 0:
-                self.print_parameters(self.model)
-            self.online_iter += 1
-
+            
             outputs = {}
             augment_outputs = self._augment_trajectories(
                 online_envs,
@@ -607,22 +602,6 @@ class Workspace:
             )
 
             self.online_iter += 1
-
-
-    def print_parameters(self, model):
-        print("Model Parameters:")
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                # Convert tensor to numpy array and slice the first few elements
-                param_data_sample = param.data.cpu().numpy().flatten()[:20]  # Display first 5 elements
-                print(f"{name}, Shape: {param.size()}, Sample Values: \n{param_data_sample}")
-
-    def print_parameter_summary(self, model):
-        print("Model Parameters Summary:")
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                print(f"{name}, Shape: {param.size()}, Mean: {param.data.mean()}, Std: {param.data.std()}")
-
 
     ##### Run
 
@@ -710,6 +689,8 @@ class Workspace:
         seed_torch(self.cfg.seed)
 
         
+
+        
         # Online Decision Transformer Initial
         print("\n\nMaking Eval Env.....")
         env_name = self.variant["env"]
@@ -731,6 +712,9 @@ class Workspace:
         if self.variant["max_pretrain_iters"]:
             self.pretrain(eval_envs, loss_fn)
 
+        
+        
+        
 
         # Main Loop for Dreamer
         obs = train_env.reset()
@@ -744,6 +728,8 @@ class Workspace:
 
         self.evaluate(eval_env)  # Initial evaluation
         self.save()
+
+        
         while self.global_frames < self.cfg.num_steps:
             if self.global_frames < self.cfg.start_steps:
                 action = train_env.action_space.sample()
@@ -755,6 +741,7 @@ class Workspace:
             episode_reward += reward
             episode_steps += 1
             
+        
             if done:
                 self.i_episode += 1
                 self.log(episode_reward, episode_steps, prefix='Train')
@@ -768,10 +755,10 @@ class Workspace:
                 self.replay_buffer.start_episode(obs)
                 agent_state = None
 
+        
             # Training
             if self.global_frames >= self.cfg.start_steps and self.global_frames % self.cfg.train_every == 0:
                 self.agent.train()
-
                 dataloader = self.replay_buffer.get_iterator(self.cfg.train_steps, self.cfg.batch_size, self.cfg.batch_length)
                 for train_step, data in enumerate(dataloader):
                     log_video = self.cfg.video and \
@@ -852,9 +839,95 @@ class Workspace:
                     for i in range(self.variant["num_online_rollouts"])
                 ]
             )
-            self.online_tuning(online_envs, eval_envs, loss_fn)
-            online_envs.close()
 
+            print("\n\n\n*** Online Finetuning ***")
+
+            trainer = SequenceTrainer(
+                model=self.model,
+                optimizer=self.optimizer,
+                log_temperature_optimizer=self.log_temperature_optimizer,
+                scheduler=self.scheduler,
+                device=self.device,
+            )
+            eval_fns = [
+                create_vec_eval_episodes_fn(
+                    vec_env=eval_envs,
+                    eval_rtg=self.variant["eval_rtg"],
+                    state_dim=self.state_dim,
+                    act_dim=self.act_dim,
+                    state_mean=self.state_mean,
+                    state_std=self.state_std,
+                    device=self.device,
+                    use_mean=True,
+                    reward_scale=self.reward_scale,
+                )
+            ]
+            writer = (
+                SummaryWriter(self.logger.log_path) if self.variant["log_to_tb"] else None
+            )
+            while self.online_iter < self.variant["max_online_iters"]:
+
+                outputs = {}
+                augment_outputs = self._augment_trajectories(
+                    online_envs,
+                    self.variant["online_rtg"],
+                    n=self.variant["num_online_rollouts"],
+                )
+                outputs.update(augment_outputs)
+
+                dataloader = create_dataloader(
+                    trajectories=self.replay_buffer_odt.trajectories,
+                    num_iters=self.variant["num_updates_per_online_iter"],
+                    batch_size=self.variant["batch_size"],
+                    max_len=self.variant["K"],
+                    state_dim=self.state_dim,
+                    act_dim=self.act_dim,
+                    state_mean=self.state_mean,
+                    state_std=self.state_std,
+                    reward_scale=self.reward_scale,
+                    action_range=self.action_range,
+                )
+
+                # finetuning
+                is_last_iter = self.online_iter == self.variant["max_online_iters"] - 1
+                if (self.online_iter + 1) % self.variant[
+                    "eval_interval"
+                ] == 0 or is_last_iter:
+                    evaluation = True
+                else:
+                    evaluation = False
+
+                train_outputs = trainer.train_iteration(
+                    loss_fn=loss_fn,
+                    dataloader=dataloader,
+                )
+                outputs.update(train_outputs)
+
+                if evaluation:
+                    eval_outputs, eval_reward = self.evaluate(eval_fns)
+                    outputs.update(eval_outputs)
+
+                outputs["time/total"] = time.time() - self.start_time
+
+                # log the metrics
+                self.logger.log_metrics(
+                    outputs,
+                    iter_num=self.pretrain_iter + self.online_iter,
+                    total_transitions_sampled=self.total_transitions_sampled,
+                    writer=writer,
+                )
+
+                self._save_model(
+                    path_prefix=self.logger.log_path,
+                    is_pretrain_model=False,
+                )
+
+                self.online_iter += 1
+
+            #self.online_tuning(online_envs, eval_envs, loss_fn)
+            online_envs.close()
+            
+            
 
     def evaluate_dreamer(self, eval_env):
         lengths_ls = []
