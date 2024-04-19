@@ -32,6 +32,9 @@ class Dreamer(nn.Module):
         
         self.build_model()
 
+        # Initialize loss storage
+        self.last_model_loss = None
+
     def build_model(self):
         cnn_act = act_dict[self.cfg.cnn_act]
         act = act_dict[self.cfg.dense_act]
@@ -98,6 +101,8 @@ class Dreamer(nn.Module):
         div = kl_divergence(post_dist, prior_dist).mean(dim=[0, 1])
         div = torch.clamp(div, min=self.cfg.free_nats)  # in case of prior = posterior => kl = 0
         model_loss = self.cfg.kl_scale * div - sum(likes.values())
+
+        self.last_model_loss = model_loss
 
         # Actor loss
         with freeze(nn.ModuleList([self.model_modules, self.value])):
@@ -167,6 +172,7 @@ class Dreamer(nn.Module):
             value_pred.mean)
         if log_video:
             self.image_summaries(data, embed, image_pred, video_path)
+
 
     @torch.no_grad()
     def scalar_summaries(
@@ -372,3 +378,10 @@ class Dreamer(nn.Module):
         self.model_modules.eval()
         self.value.eval()
         self.actor.eval()
+
+    def get_last_losses(self):
+        """
+        Returns the most recently computed losses without re-running the update.
+        """
+        return self.last_model_loss
+
