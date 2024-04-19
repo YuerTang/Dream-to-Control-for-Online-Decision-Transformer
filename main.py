@@ -203,6 +203,8 @@ class Workspace:
 
         # Initialize Dreamer with both Dreamer and ODT configurations
         self.agent = Agent(cfg, train_env.action_space).to(cfg.device)
+
+
         self.replay_buffer = Replay_Buffer(action_space=train_env.action_space, balance=False)
         self.records = {"reward_train": {}, "reward_test": {}} 
 
@@ -501,17 +503,41 @@ class Workspace:
             attention_mask,
             entropy_reg,
         ):
-            # a_hat is a SquashedNormal Distribution
-            log_likelihood = a_hat_dist.log_likelihood(a)[attention_mask > 0].mean()
+            dreamer_model_loss = self.agent.get_last_losses()
 
-            entropy = a_hat_dist.entropy().mean()
-            loss = -(log_likelihood + entropy_reg * entropy)
+            if dreamer_model_loss is None:
+                log_likelihood = a_hat_dist.log_likelihood(a)[attention_mask > 0].mean()
 
-            return (
-                loss,
-                -log_likelihood,
-                entropy,
-            )
+                entropy = a_hat_dist.entropy().mean()
+                loss = -(log_likelihood + entropy_reg * entropy) 
+
+                return (
+                    loss,
+                    -log_likelihood,
+                    entropy,
+                )
+                
+            else: 
+                
+                dreamer_model_loss = dreamer_model_loss.detach()  # Detach from graph
+                log_likelihood = a_hat_dist.log_likelihood(a)[attention_mask > 0].mean()
+
+                entropy = a_hat_dist.entropy().mean()
+                # Incorporate the model loss from Dreamer
+                loss = -(log_likelihood + entropy_reg * entropy + dreamer_model_loss) 
+
+                return (
+                    loss,
+                    -log_likelihood,
+                    entropy,
+                )
+
+
+
+
+
+
+
 
         def get_env_builder(seed, env_name, target_goal=None):
             def make_env_fn():
@@ -655,8 +681,6 @@ class Workspace:
 
             while self.global_frames < self.cfg.num_steps: # and self.online_iter < self.variant["max_online_iters"]:
 
-                
-
                 if self.global_frames < self.cfg.start_steps:
                     action = train_env.action_space.sample()
                 else:
@@ -685,6 +709,19 @@ class Workspace:
                  
 
                 if self.global_frames >= self.cfg.start_steps and self.global_frames % self.cfg.train_every == 0:
+                    
+
+
+                    # Dreamer Model Loss
+                    model_loss = self.agent.get_last_losses()
+
+                    if model_loss is None:
+                        print("Model loss is None")
+                    #print(model_loss)
+                    else: 
+                        print("Model loss is not None")
+
+                
 
                     
                     outputs = {}
@@ -718,9 +755,6 @@ class Workspace:
                     else:
                         evaluation = False
                     
-                    print("Loss Function:")
-                    print(loss_fn)
-
                     train_outputs = trainer.train_iteration(
                         loss_fn=loss_fn,
                         dataloader=dataloader,
