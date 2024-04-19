@@ -6,7 +6,6 @@ import os
 from omegaconf import OmegaConf, open_dict, DictConfig
 from visual_control.dreamer import Dreamer  as Agent
 
-
 from typing import Optional, Tuple, List, Dict, Union
 from visual_control.buffer import Replay_Buffer
 from decision_transformer.models.decision_transformer import DecisionTransformer
@@ -18,6 +17,7 @@ import argparse
 import pickle
 import random
 import time
+from time import sleep
 import logging
 import d4rl
 from dataclasses import dataclass, field
@@ -379,6 +379,8 @@ class Workspace:
             # generate init state
             target_return = [target_explore * self.reward_scale] * online_envs.num_envs
 
+
+            
             returns, lengths, trajs = vec_evaluate_episode_rtg(
                 online_envs,
                 self.state_dim,
@@ -392,7 +394,8 @@ class Workspace:
                 state_std=self.state_std,
                 device=self.device,
                 use_mean=False,
-            )
+                )
+            
 
         self.replay_buffer_odt.add_new_trajs(trajs)
         self.aug_trajs += trajs
@@ -516,93 +519,7 @@ class Workspace:
         self.records["reward_test"][self.i_episode] = avg_reward
         return avg_reward
 
-    def online_tuning(self, online_envs, eval_envs, loss_fn):
-
-        print("\n\n\n*** Online Finetuning ***")
-
-        trainer = SequenceTrainer(
-            model=self.model,
-            optimizer=self.optimizer,
-            log_temperature_optimizer=self.log_temperature_optimizer,
-            scheduler=self.scheduler,
-            device=self.device,
-        )
-        eval_fns = [
-            create_vec_eval_episodes_fn(
-                vec_env=eval_envs,
-                eval_rtg=self.variant["eval_rtg"],
-                state_dim=self.state_dim,
-                act_dim=self.act_dim,
-                state_mean=self.state_mean,
-                state_std=self.state_std,
-                device=self.device,
-                use_mean=True,
-                reward_scale=self.reward_scale,
-            )
-        ]
-        writer = (
-            SummaryWriter(self.logger.log_path) if self.variant["log_to_tb"] else None
-        )
-        while self.online_iter < self.variant["max_online_iters"]:
-
-            
-            outputs = {}
-            augment_outputs = self._augment_trajectories(
-                online_envs,
-                self.variant["online_rtg"],
-                n=self.variant["num_online_rollouts"],
-            )
-            outputs.update(augment_outputs)
-
-            dataloader = create_dataloader(
-                trajectories=self.replay_buffer_odt.trajectories,
-                num_iters=self.variant["num_updates_per_online_iter"],
-                batch_size=self.variant["batch_size"],
-                max_len=self.variant["K"],
-                state_dim=self.state_dim,
-                act_dim=self.act_dim,
-                state_mean=self.state_mean,
-                state_std=self.state_std,
-                reward_scale=self.reward_scale,
-                action_range=self.action_range,
-            )
-
-            # finetuning
-            is_last_iter = self.online_iter == self.variant["max_online_iters"] - 1
-            if (self.online_iter + 1) % self.variant[
-                "eval_interval"
-            ] == 0 or is_last_iter:
-                evaluation = True
-            else:
-                evaluation = False
-
-            train_outputs = trainer.train_iteration(
-                loss_fn=loss_fn,
-                dataloader=dataloader,
-            )
-            outputs.update(train_outputs)
-
-            if evaluation:
-                eval_outputs, eval_reward = self.evaluate_odt(eval_fns)
-                outputs.update(eval_outputs)
-
-            outputs["time/total"] = time.time() - self.start_time
-
-            # log the metrics
-            self.logger.log_metrics(
-                outputs,
-                iter_num=self.pretrain_iter + self.online_iter,
-                total_transitions_sampled=self.total_transitions_sampled,
-                writer=writer,
-            )
-
-            self._save_model(
-                path_prefix=self.logger.log_path,
-                is_pretrain_model=False,
-            )
-
-            self.online_iter += 1
-
+    
     ##### Run
 
     def run(self):
@@ -691,7 +608,7 @@ class Workspace:
         
 
         
-        # Online Decision Transformer Initial
+        # Online Decision Transformer Initial (Pretrain)
         print("\n\nMaking Eval Env.....")
         env_name = self.variant["env"]
         if "antmaze" in env_name:
@@ -712,8 +629,7 @@ class Workspace:
         if self.variant["max_pretrain_iters"]:
             self.pretrain(eval_envs, loss_fn)
 
-        
-        
+        print("Pretrained Finished!")
         
 
         # Main Loop for Dreamer
@@ -722,115 +638,14 @@ class Workspace:
         agent_state = None
         self.timer = Timer()
         self.last_frames = 0
-        
+
+
         episode_reward = 0
         episode_steps = 0
 
         self.evaluate(eval_env)  # Initial evaluation
         self.save()
 
-        
-        while self.global_frames < self.cfg.num_steps:
-            if self.global_frames < self.cfg.start_steps:
-                action = train_env.action_space.sample()
-            else:
-                action, agent_state = self.agent.get_action(obs, agent_state, training=True)
-            obs, reward, done, info = train_env.step(action)
-            self.replay_buffer.add(obs, action, reward, done, info)
-            self.global_steps += 1
-            episode_reward += reward
-            episode_steps += 1
-            
-        
-            if done:
-                self.i_episode += 1
-                self.log(episode_reward, episode_steps, prefix='Train')
-                if self.cfg.wandb:
-                    wandb.log({"reward_train": episode_reward}, step=self.global_frames)
-                self.records["reward_train"][self.i_episode] = episode_reward
-                # Reset
-                episode_reward = 0
-                episode_steps = 0
-                obs = train_env.reset()
-                self.replay_buffer.start_episode(obs)
-                agent_state = None
-
-        
-            # Training
-            if self.global_frames >= self.cfg.start_steps and self.global_frames % self.cfg.train_every == 0:
-                self.agent.train()
-                dataloader = self.replay_buffer.get_iterator(self.cfg.train_steps, self.cfg.batch_size, self.cfg.batch_length)
-                for train_step, data in enumerate(dataloader):
-                    log_video = self.cfg.video and \
-                            self.global_frames % self.cfg.eval_every == 0 and train_step == 0
-                    self.agent.update(data, log_video=log_video,
-                            video_path=os.path.join(self.video_dir, f'error_{self.global_frames_str}.gif'))
-
-                if self.global_frames % self.cfg.log_every == 0:
-                    if self.cfg.wandb:
-                        wandb_dict = {
-                            "loss/image": self.agent.metrics['image_loss'].result(),
-                            "loss/reward": self.agent.metrics['reward_loss'].result(),
-                            "loss/model": self.agent.metrics['model_loss'].result(),
-                            "loss/actor": self.agent.metrics['actor_loss'].result(),
-                            
-                            "ent/prior": self.agent.metrics['prior_ent'].result(),
-                            "ent/posterior": self.agent.metrics['post_ent'].result(),
-                            "KL_div": self.agent.metrics['div'].result(),
-                        }
-                        if cfg.dreamer in [0,]:
-                            wandb_dict.update({
-                                "loss/value": self.agent.metrics['value_loss'].result(),
-                                "ent/action": self.agent.metrics['action_ent'].result(),
-                                "ent/paz_logstd": self.agent.metrics["action_logstd"].result(),
-                                "value_func": self.agent.metrics['value_func'].result(),
-                                "log_pi": self.agent.metrics['log_pi'].result(),
-                            })
-
-                        else:
-                            if cfg.dreamer == 1:
-                                wandb_dict.update({
-                                    "ent/action": self.agent.metrics['action_ent'].result()
-                                    })
-                            wandb_dict.update({
-                                "loss/critic": self.agent.metrics['critic_loss'].result(),
-                                "loss/alpha": self.agent.metrics['alpha_loss'].result(),
-                                "ent/paz_logstd": self.agent.metrics["action_logstd"].result(),
-                                "alpha": self.agent.metrics['alpha'].result(),
-                                "log_pi": self.agent.metrics['log_pi'].result(),
-                                "q_func": self.agent.metrics['q_func'].result(),
-                            })
-
-                        if cfg.dreamer in [2,]:
-                            wandb_dict.update({"ent/feature_std": self.agent.metrics["feature_std"].result()})
-                        
-                        wandb.log(wandb_dict, step=self.global_frames)
-
-                    metrics = [(k, float(v.result())) for k, v in self.agent.metrics.items()]
-                    [m.reset_states() for m in self.agent.metrics.values()]
-                    print(colored(f'[{self.global_frames}]', 'yellow'), ' / '.join(f'{k} {v:.1f}' for k, v in metrics))
-
-            if self.global_frames % self.cfg.eval_every == 0:
-                avg_reward = self.evaluate_dreamer(eval_env)
-                if self.cfg.wandb:
-                    wandb.log({"reward_test": avg_reward}, step=self.global_frames)
-                    if self.cfg.video:
-                        wandb.log({
-                            f"{self.global_frames_str}":
-                                            wandb.Video(os.path.join(self.video_recorder.save_dir,
-                                                    f'eval_{self.global_frames_str}.gif')),
-                            f"error_{self.global_frames}":
-                                            wandb.Video(os.path.join(self.video_dir,
-                                                    f'error_{self.global_frames_str}.gif'))
-                            })
-                self.save()
-
-        train_env.close()
-        eval_env.close()
-        if self.cfg.wandb:
-            wandb.finish()
-
-        # Main Loop for Online Decision Transformer
         if self.variant["max_online_iters"]:
             print("\n\nMaking Online Env.....")
             online_envs = SubprocVecEnv(
@@ -865,69 +680,181 @@ class Workspace:
             writer = (
                 SummaryWriter(self.logger.log_path) if self.variant["log_to_tb"] else None
             )
-            while self.online_iter < self.variant["max_online_iters"]:
 
-                outputs = {}
-                augment_outputs = self._augment_trajectories(
-                    online_envs,
-                    self.variant["online_rtg"],
-                    n=self.variant["num_online_rollouts"],
-                )
-                outputs.update(augment_outputs)
 
-                dataloader = create_dataloader(
-                    trajectories=self.replay_buffer_odt.trajectories,
-                    num_iters=self.variant["num_updates_per_online_iter"],
-                    batch_size=self.variant["batch_size"],
-                    max_len=self.variant["K"],
-                    state_dim=self.state_dim,
-                    act_dim=self.act_dim,
-                    state_mean=self.state_mean,
-                    state_std=self.state_std,
-                    reward_scale=self.reward_scale,
-                    action_range=self.action_range,
-                )
+            while self.global_frames < self.cfg.num_steps: # and self.online_iter < self.variant["max_online_iters"]:
 
-                # finetuning
-                is_last_iter = self.online_iter == self.variant["max_online_iters"] - 1
-                if (self.online_iter + 1) % self.variant[
-                    "eval_interval"
-                ] == 0 or is_last_iter:
-                    evaluation = True
+                
+
+                if self.global_frames < self.cfg.start_steps:
+                    action = train_env.action_space.sample()
                 else:
-                    evaluation = False
+                    action, agent_state = self.agent.get_action(obs, agent_state, training=True)
 
-                train_outputs = trainer.train_iteration(
-                    loss_fn=loss_fn,
-                    dataloader=dataloader,
-                )
-                outputs.update(train_outputs)
+                
+                obs, reward, done, info = train_env.step(action)
+                self.replay_buffer.add(obs, action, reward, done, info)
+                self.global_steps += 1
+                episode_reward += reward
+                episode_steps += 1
+                
+                if done:
+                    self.i_episode += 1
+                    self.log(episode_reward, episode_steps, prefix='Train')
+                    if self.cfg.wandb:
+                        wandb.log({"reward_train": episode_reward}, step=self.global_frames)
+                    self.records["reward_train"][self.i_episode] = episode_reward
+                    # Reset
+                    episode_reward = 0
+                    episode_steps = 0
+                    obs = train_env.reset()
+                    self.replay_buffer.start_episode(obs)
+                    agent_state = None
 
-                if evaluation:
-                    eval_outputs, eval_reward = self.evaluate(eval_fns)
-                    outputs.update(eval_outputs)
+                 
 
-                outputs["time/total"] = time.time() - self.start_time
+                if self.global_frames >= self.cfg.start_steps and self.global_frames % self.cfg.train_every == 0:
 
-                # log the metrics
-                self.logger.log_metrics(
-                    outputs,
-                    iter_num=self.pretrain_iter + self.online_iter,
-                    total_transitions_sampled=self.total_transitions_sampled,
-                    writer=writer,
-                )
+                    
+                    outputs = {}
+                    augment_outputs = self._augment_trajectories(
+                        online_envs,
+                        self.variant["online_rtg"],
+                        n=self.variant["num_online_rollouts"],
+                    )
+                    outputs.update(augment_outputs)
+                    
 
-                self._save_model(
-                    path_prefix=self.logger.log_path,
-                    is_pretrain_model=False,
-                )
+                    dataloader = create_dataloader(
+                        trajectories=self.replay_buffer_odt.trajectories,
+                        num_iters=self.variant["num_updates_per_online_iter"],
+                        batch_size=self.variant["batch_size"],
+                        max_len=self.variant["K"],
+                        state_dim=self.state_dim,
+                        act_dim=self.act_dim,
+                        state_mean=self.state_mean,
+                        state_std=self.state_std,
+                        reward_scale=self.reward_scale,
+                        action_range=self.action_range,
+                    )
 
-                self.online_iter += 1
+                    # finetuning
+                    is_last_iter = self.online_iter == self.variant["max_online_iters"] - 1
+                    if (self.online_iter + 1) % self.variant[
+                        "eval_interval"
+                    ] == 0 or is_last_iter:
+                        evaluation = True
+                    else:
+                        evaluation = False
+                    
+                    print("Loss Function:")
+                    print(loss_fn)
 
-            #self.online_tuning(online_envs, eval_envs, loss_fn)
-            online_envs.close()
-            
-            
+                    train_outputs = trainer.train_iteration(
+                        loss_fn=loss_fn,
+                        dataloader=dataloader,
+                    )
+                    outputs.update(train_outputs)
+
+                    if evaluation:
+                        eval_outputs, eval_reward = self.evaluate(eval_fns)
+                        outputs.update(eval_outputs)
+
+                    outputs["time/total"] = time.time() - self.start_time
+
+                    # log the metrics
+                    self.logger.log_metrics(
+                        outputs,
+                        iter_num=self.pretrain_iter + self.online_iter,
+                        total_transitions_sampled=self.total_transitions_sampled,
+                        writer=writer,
+                    )
+
+                    self._save_model(
+                        path_prefix=self.logger.log_path,
+                        is_pretrain_model=False,
+                    )
+
+                    self.online_iter += 1
+
+                    self.agent.train()
+                    dataloader = self.replay_buffer.get_iterator(self.cfg.train_steps, self.cfg.batch_size, self.cfg.batch_length)
+
+
+
+                    for train_step, data in enumerate(dataloader):
+                        log_video = self.cfg.video and \
+                                self.global_frames % self.cfg.eval_every == 0 and train_step == 0
+                        self.agent.update(data, log_video=log_video,
+                                video_path=os.path.join(self.video_dir, f'error_{self.global_frames_str}.gif'))
+
+                
+                    if self.global_frames % self.cfg.log_every == 0:
+                        if self.cfg.wandb:
+                            wandb_dict = {
+                                "loss/image": self.agent.metrics['image_loss'].result(),
+                                "loss/reward": self.agent.metrics['reward_loss'].result(),
+                                "loss/model": self.agent.metrics['model_loss'].result(),
+                                "loss/actor": self.agent.metrics['actor_loss'].result(),
+                                
+                                "ent/prior": self.agent.metrics['prior_ent'].result(),
+                                "ent/posterior": self.agent.metrics['post_ent'].result(),
+                                "KL_div": self.agent.metrics['div'].result(),
+                            }
+                            if cfg.dreamer in [0,]:
+                                wandb_dict.update({
+                                    "loss/value": self.agent.metrics['value_loss'].result(),
+                                    "ent/action": self.agent.metrics['action_ent'].result(),
+                                    "ent/paz_logstd": self.agent.metrics["action_logstd"].result(),
+                                    "value_func": self.agent.metrics['value_func'].result(),
+                                    "log_pi": self.agent.metrics['log_pi'].result(),
+                                })
+
+                            else:
+                                if cfg.dreamer == 1:
+                                    wandb_dict.update({
+                                        "ent/action": self.agent.metrics['action_ent'].result()
+                                        })
+                                wandb_dict.update({
+                                    "loss/critic": self.agent.metrics['critic_loss'].result(),
+                                    "loss/alpha": self.agent.metrics['alpha_loss'].result(),
+                                    "ent/paz_logstd": self.agent.metrics["action_logstd"].result(),
+                                    "alpha": self.agent.metrics['alpha'].result(),
+                                    "log_pi": self.agent.metrics['log_pi'].result(),
+                                    "q_func": self.agent.metrics['q_func'].result(),
+                                })
+
+                            if cfg.dreamer in [2,]:
+                                wandb_dict.update({"ent/feature_std": self.agent.metrics["feature_std"].result()})
+                            
+                            wandb.log(wandb_dict, step=self.global_frames)
+
+                        metrics = [(k, float(v.result())) for k, v in self.agent.metrics.items()]
+                        [m.reset_states() for m in self.agent.metrics.values()]
+                        print(colored(f'[{self.global_frames}]', 'yellow'), ' / '.join(f'{k} {v:.1f}' for k, v in metrics))
+
+                #online_envs.close() 
+
+                if self.global_frames % self.cfg.eval_every == 0:
+                    avg_reward = self.evaluate_dreamer(eval_env)
+                    if self.cfg.wandb:
+                        wandb.log({"reward_test": avg_reward}, step=self.global_frames)
+                        if self.cfg.video:
+                            wandb.log({
+                                f"{self.global_frames_str}":
+                                                wandb.Video(os.path.join(self.video_recorder.save_dir,
+                                                        f'eval_{self.global_frames_str}.gif')),
+                                f"error_{self.global_frames}":
+                                                wandb.Video(os.path.join(self.video_dir,
+                                                        f'error_{self.global_frames_str}.gif'))
+                                })
+                    self.save()
+
+        train_env.close()
+        eval_env.close()
+        if self.cfg.wandb:
+            wandb.finish()
+
 
     def evaluate_dreamer(self, eval_env):
         lengths_ls = []
@@ -1009,13 +936,13 @@ def main():
         "ordering": 0,
         "eval_rtg": 3600,
         "init_temperature": 0.1,
-        "batch_size": 256,
+        "batch_size": 8, #changed from 256
         "num_eval_episodes": 10,
         "eval_context_length": 5,
         "max_pretrain_iters": 1,
         "weight_decay": 5e-4,
-        "warmup_steps": 10000,
-        "num_updates_per_pretrain_iter": 5000,
+        "warmup_steps": 10000, #changed from 10000
+        "num_updates_per_pretrain_iter": 500, #changed from 5000
         "max_online_iters": 1500,
         "online_rtg": 7200,
         "num_online_rollouts": 1,
