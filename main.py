@@ -485,40 +485,7 @@ class Workspace:
         eval_reward = outputs["evaluation/return_mean_gm"]
         return outputs, eval_reward
     
-    def evaluate(self, eval_env):
-        lengths_ls = []
-        episode_reward_ls = []
-        self.agent.eval()
-        for epi_idx in range(self.cfg.num_eval_episodes):
-            if self.cfg.video:
-                self.video_recorder.init(enabled= (epi_idx == 0))
-
-            obs = eval_env.reset()
-            episode_reward = 0
-            length = 0
-            agent_state = None
-            done = False
-            while not done:
-                action, agent_state = self.agent.get_action(obs, agent_state, training=False)
-                obs, reward, done, _ = eval_env.step(action)
-                episode_reward += reward
-                length += 1
-
-                if self.cfg.video:
-                    self.video_recorder.record(eval_env)
-
-            episode_reward_ls.append(episode_reward)
-            lengths_ls.append(length)
-
-            if self.cfg.video:
-                self.video_recorder.save(f'eval_{self.global_frames_str}.gif')
-
-        avg_reward = float(np.mean(episode_reward_ls))
-        avg_length = float(np.mean(lengths_ls))
-        self.log(avg_reward, avg_length, prefix='Test')
-        self.records["reward_test"][self.i_episode] = avg_reward
-        return avg_reward
-
+    
     
     ##### Run
 
@@ -643,7 +610,11 @@ class Workspace:
         episode_reward = 0
         episode_steps = 0
 
-        self.evaluate(eval_env)  # Initial evaluation
+        self.evaluate_dreamer(eval_env)  # Initial evaluation
+
+        #self.evaluate(eval_env)
+
+
         self.save()
 
         if self.variant["max_online_iters"]:
@@ -757,7 +728,7 @@ class Workspace:
                     outputs.update(train_outputs)
 
                     if evaluation:
-                        eval_outputs, eval_reward = self.evaluate(eval_fns)
+                        eval_outputs, eval_reward = self.evaluate_odt(eval_fns)
                         outputs.update(eval_outputs)
 
                     outputs["time/total"] = time.time() - self.start_time
