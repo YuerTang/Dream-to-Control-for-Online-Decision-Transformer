@@ -42,6 +42,7 @@ class Replay_Buffer:
         transition['discount'] = 1.0
         self.current_episode = [transition]
 
+    
     def add(self, obs: dict, action: np.ndarray, reward: float, done: bool,
             info: dict):
         transition = {"image": obs.copy()}
@@ -54,12 +55,31 @@ class Replay_Buffer:
         if done:
             # slow: list of ndarrays -> torch tensor
             # fast: list of ndarrays -> ndarray -> torch tensor
+            if self.current_episode:
+                episode = {
+                    k: torch.tensor(np.stack([t[k] for t in self.current_episode if isinstance(t[k], np.ndarray)]), dtype=torch.float32)
+                    for k in self.current_episode[0] if any(isinstance(t[k], np.ndarray) for t in self.current_episode)
+                }
+                self.episodes.append(episode)
+                self.current_episode = []
+            else:
+                print("Warning: current_episode is empty.")
+
+            '''
             episode = {
-                k: torch.tensor(np.stack([t[k] for t in self.current_episode]), dtype=torch.float32)
-                for k in self.current_episode[0]
+                k: torch.tensor(np.stack([t[k] for t in self.current_episode if isinstance(t[k], np.ndarray)]), dtype=torch.float32)
+                for k in self.current_episode[0] if k != 'problematic_key'
+
+
+                #k: torch.tensor(np.stack([t[k] for t in self.current_episode]), dtype=torch.float32)
+                #for k in self.current_episode[0]
             }
+            '''
             self.episodes.append(episode)
             self.current_episode = []
+    
+
+
 
     def sample_single_episode(self, length: int): 
         while True:
