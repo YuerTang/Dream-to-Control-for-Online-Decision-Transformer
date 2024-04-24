@@ -55,7 +55,7 @@ class Config:
     resume: str = ""
     device: int = 0
     video: bool = False
-    num_eval_episodes: int = 5
+    num_eval_episodes: int = 1 #5
     dm_control: bool = True
     env: str = "cheetah_run"
     wandb: bool = False
@@ -103,7 +103,7 @@ class Config:
     # Model specific settings
     num_units: int = 300
     deter_size: int = 200
-    stoch_size: int = 30
+    stoch_size: int = 17#was 30
     rssm_std: float = 0.1
     ts: bool = False  # Thompson sampling
 
@@ -178,6 +178,7 @@ def get_env_name(cfg):
 class Workspace:
     def __init__(self, cfg, variant):
 
+        
         ### Dreamer Setup
         if not isinstance(cfg, DictConfig):
             cfg = OmegaConf.create(cfg)
@@ -278,6 +279,12 @@ class Workspace:
         self.reward_scale = 1.0 if "antmaze" in variant["env"] else 0.001
         self.logger = Logger(variant)
 
+        #Collect Trajectories
+        self.get_dreamer_action = []
+        self.get_dreamer_state = []
+        self.get_dreamer_reward = []
+        self.get_dreamer_done = []
+
     def _get_env_spec(self, variant):
         env = gym.make(variant["env"])
         state_dim = env.observation_space.shape[0]
@@ -342,6 +349,8 @@ class Workspace:
             states.append(path["observations"])
             traj_lens.append(len(path["observations"]))
             returns.append(path["rewards"].sum())
+
+        #print(states[:5])
         traj_lens, returns = np.array(traj_lens), np.array(returns)
 
         # used for input normalization
@@ -641,6 +650,7 @@ class Workspace:
         episode_steps = 0
 
         self.evaluate_dreamer(eval_env)  # Initial evaluation
+        print("Dreamer Evaluate Method Called")
 
         #self.evaluate(eval_env)
 
@@ -748,6 +758,7 @@ class Workspace:
                     else:
                         evaluation = False
                     
+                    self.evaluate_dreamer(eval_env)
                     dreamer_trajectories = self.collect_trajectories(train_env, self.agent, self.collector)
                     
                     self.replay_buffer_odt.add_new_trajs(dreamer_trajectories)
@@ -838,6 +849,8 @@ class Workspace:
 
                 if self.global_frames % self.cfg.eval_every == 0:
                     avg_reward = self.evaluate_dreamer(eval_env)
+                    print("Dreamer Evaluate Method Called")
+                    
                     if self.cfg.wandb:
                         wandb.log({"reward_test": avg_reward}, step=self.global_frames)
                         if self.cfg.video:
@@ -858,6 +871,8 @@ class Workspace:
 
 
     def evaluate_dreamer(self, eval_env):
+
+        
         lengths_ls = []
         episode_reward_ls = []
         self.agent.eval()
@@ -873,9 +888,15 @@ class Workspace:
             while not done:
                 #action, agent_state = self.agent.get_action(obs=obs, training=False, state=agent_state)
                 action, agent_state = self.agent.get_action(obs, agent_state, training=False)
+
                 obs, reward, done, _ = eval_env.step(action)
                 episode_reward += reward
                 length += 1
+
+                self.get_dreamer_action.append(action)
+                self.get_dreamer_state.append(agent_state)
+                self.get_dreamer_reward.append(reward)
+                self.get_dreamer_done.append(done)
 
                 if self.cfg.video:
                     self.video_recorder.record(eval_env)
@@ -920,46 +941,20 @@ class Workspace:
         return f'frame{self.global_frames:0{length}d}'
     
 
+
     def collect_trajectories(self, env, agent, collector):
         trajectories = []
-        obs = env.reset()  # This should be in the format [3, 64, 64] if it's image data
         done = False
         states, actions, rewards, dones = [], [], [], []
 
-        while not done:
-            # Transform the current observation and store it
-            transformed_obs = collector.transform_model_obs(obs)
-            states.append(transformed_obs)  # Each entry should already be (1000, 17)
 
-            # Get action, step environment, collect output
-            action = agent.get_returned_action()
-            next_obs, reward, done, _ = env.step(action)
+        numerical_states = [state[0]['mean'].cpu().numpy() for state in self.get_dreamer_state]
+        states = torch.tensor(numerical_states, dtype=torch.float32)
 
-            # Transform action, reward, and append
-            transformed_action = collector.transform_model_action(action)
-            actions.append(transformed_action)
-
-            transformed_reward = collector.transform_model_rewards(reward)
-            rewards.append(transformed_reward)
-
-            dones.append(float(done))
-
-            # Update obs with the new observation from the environment
-            obs = next_obs
-
-            if done:
-                break  # Stop collecting if the episode ends
-
-        states = torch.tensor(torch.from_numpy(np.concatenate(states, axis=0)[:1000]), dtype=torch.float32)  # Ensure it's a tensor
-        actions = torch.tensor(torch.from_numpy(np.concatenate(actions, axis=0)[:1000]), dtype=torch.float32)
-        rewards = torch.tensor(torch.from_numpy(np.array(rewards).flatten()[:1000]), dtype=torch.float32).reshape(-1, 1)
-        dones = torch.tensor(torch.from_numpy(np.array(dones, dtype=bool).flatten()[:1000]), dtype=torch.bool)
-
-        # Stack arrays or concatenate along the correct axis and truncate
-        #states = torch.tensor(np.concatenate(states, axis=0)[:1000], dtype=torch.float32)  # Ensure it's a tensor
-        #actions = torch.tensor(np.concatenate(actions, axis=0)[:1000], dtype=torch.float32)
-        #rewards = torch.tensor(np.array(rewards).flatten()[:1000], dtype=torch.float32).reshape(-1, 1)
-        #dones = torch.tensor(np.array(dones, dtype=bool).flatten()[:1000], dtype=torch.bool)
+        # Converting list of actions and rewards to tensors
+        actions = torch.tensor(self.get_dreamer_action, dtype=torch.float64)
+        rewards = torch.tensor(self.get_dreamer_reward, dtype=torch.float32)
+        dones = torch.tensor(self.get_dreamer_done, dtype=torch.bool)
 
         trajectory = {
             "observations": states,
@@ -970,17 +965,17 @@ class Workspace:
 
         trajectories.append(trajectory)
 
-        print("Collected Trajectory Details:")
-        for key, value in trajectory.items():
-            print(f"{key}: shape={value.shape}, dtype={value.dtype}")
+        # Printing the shapes of the tensors
+        print("Shape of states tensor:", states.shape)
+        print("Shape of actions tensor:", actions.shape)
+        print("Shape of rewards tensor:", rewards.shape)
+        print("Shape of dones tensor:", dones.shape)
+
+
+        self.get_dreamer_state, self.get_dreamer_action, self.get_dreamer_reward, self.get_dreamer_done = [], [], [], []
 
         tuple_trajectories = tuple(trajectories)
         return tuple_trajectories
-
-
-
-
-
 
 
 '''
