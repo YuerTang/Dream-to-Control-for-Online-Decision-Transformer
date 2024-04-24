@@ -25,6 +25,3 @@ python main.py
 
 ## For any questions, please contact:
 ericjiang0318@g.ucla.edu
-
-
-Save this as `README.md` in your project directory. This format uses Markdown syntax, which is widely used for documentation, particularly on platforms like GitHub. This README includes instructions on how to start the application and contact information for further support.
