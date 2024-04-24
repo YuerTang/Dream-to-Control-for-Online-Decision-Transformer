@@ -38,6 +38,8 @@ from visual_control.utils import Timer
 import pickle as pkl
 from lib.utils import seed_torch, make_env, make_eval_env, mask_env_state, VideoRecorder, makedirs
 
+from trajectory_collector import TrajectoryCollector as collector
+
 MAX_EPISODE_LEN = 1000
 
 log = logging.getLogger(__name__)
@@ -59,7 +61,7 @@ class Config:
     wandb: bool = False
     from_pixels: bool = True
     pixels_width: int = 64
-    action_repeat: int = 2
+    action_repeat: int = 1 #2
     batch_size: int = 50
     batch_length: int = 50
     train_steps: int = 100
@@ -159,7 +161,7 @@ class Config:
     #random
     stochastic_policy: bool = False  # Set to True if your model should use a stochastic policy
     nmode: int = 1
-    replay_buffer_size: int = 100
+    replay_buffer_size: int = 10 #was 100
         
     hydra_run_dir: str = "./outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}"
     hydra_sweep_dir: str = "/checkpoint/${user}/RL-LVM/dreamer/${now:%Y.%m.%d}/${now:%H.%M.%S}"
@@ -213,7 +215,7 @@ class Workspace:
             self.video_recorder = VideoRecorder(self.work_dir if cfg.video else None)
             makedirs(self.video_dir)
 
-
+        self.collector = collector()
 
         ### Online Decision Transformer
 
@@ -223,6 +225,8 @@ class Workspace:
         )
         # initialize by offline trajs
         self.replay_buffer_odt = ReplayBuffer(variant["replay_size"], self.offline_trajs)
+
+        #self.replay_buffer_odt.print_details()
 
         self.aug_trajs = []
 
@@ -524,7 +528,7 @@ class Workspace:
 
                 entropy = a_hat_dist.entropy().mean()
                 # Incorporate the model loss from Dreamer
-                loss = -(log_likelihood + entropy_reg * entropy + dreamer_model_loss) 
+                loss = -(log_likelihood + entropy_reg * entropy)# + dreamer_model_loss) 
 
                 return (
                     loss,
@@ -684,6 +688,8 @@ class Workspace:
                 if self.global_frames < self.cfg.start_steps:
                     action = train_env.action_space.sample()
                 else:
+                    #action, agent_state = self.agent.get_action(obs=obs, training=True, state=agent_state)
+
                     action, agent_state = self.agent.get_action(obs, agent_state, training=True)
 
                 
@@ -711,19 +717,6 @@ class Workspace:
                 if self.global_frames >= self.cfg.start_steps and self.global_frames % self.cfg.train_every == 0:
                     
 
-
-                    # Dreamer Model Loss
-                    model_loss = self.agent.get_last_losses()
-
-                    if model_loss is None:
-                        print("Model loss is None")
-                    #print(model_loss)
-                    else: 
-                        print("Model loss is not None")
-
-                
-
-                    
                     outputs = {}
                     augment_outputs = self._augment_trajectories(
                         online_envs,
@@ -755,6 +748,9 @@ class Workspace:
                     else:
                         evaluation = False
                     
+                    dreamer_trajectories = self.collect_trajectories(train_env, self.agent, self.collector)
+                    
+                    self.replay_buffer_odt.add_new_trajs(dreamer_trajectories)
                     train_outputs = trainer.train_iteration(
                         loss_fn=loss_fn,
                         dataloader=dataloader,
@@ -875,6 +871,7 @@ class Workspace:
             agent_state = None
             done = False
             while not done:
+                #action, agent_state = self.agent.get_action(obs=obs, training=False, state=agent_state)
                 action, agent_state = self.agent.get_action(obs, agent_state, training=False)
                 obs, reward, done, _ = eval_env.step(action)
                 episode_reward += reward
@@ -921,9 +918,94 @@ class Workspace:
     def global_frames_str(self):
         length = len(str(self.cfg.num_steps))
         return f'frame{self.global_frames:0{length}d}'
+    
 
+    def collect_trajectories(self, env, agent, collector):
+        trajectories = []
+        obs = env.reset()  # This should be in the format [3, 64, 64] if it's image data
+        done = False
+        states, actions, rewards, dones = [], [], [], []
+
+        while not done:
+            # Transform the current observation and store it
+            transformed_obs = collector.transform_model_obs(obs)
+            states.append(transformed_obs)  # Each entry should already be (1000, 17)
+
+            # Get action, step environment, collect output
+            action = agent.get_returned_action()
+            next_obs, reward, done, _ = env.step(action)
+
+            # Transform action, reward, and append
+            transformed_action = collector.transform_model_action(action)
+            actions.append(transformed_action)
+
+            transformed_reward = collector.transform_model_rewards(reward)
+            rewards.append(transformed_reward)
+
+            dones.append(float(done))
+
+            # Update obs with the new observation from the environment
+            obs = next_obs
+
+            if done:
+                break  # Stop collecting if the episode ends
+
+        states = torch.tensor(torch.from_numpy(np.concatenate(states, axis=0)[:1000]), dtype=torch.float32)  # Ensure it's a tensor
+        actions = torch.tensor(torch.from_numpy(np.concatenate(actions, axis=0)[:1000]), dtype=torch.float32)
+        rewards = torch.tensor(torch.from_numpy(np.array(rewards).flatten()[:1000]), dtype=torch.float32).reshape(-1, 1)
+        dones = torch.tensor(torch.from_numpy(np.array(dones, dtype=bool).flatten()[:1000]), dtype=torch.bool)
+
+        # Stack arrays or concatenate along the correct axis and truncate
+        #states = torch.tensor(np.concatenate(states, axis=0)[:1000], dtype=torch.float32)  # Ensure it's a tensor
+        #actions = torch.tensor(np.concatenate(actions, axis=0)[:1000], dtype=torch.float32)
+        #rewards = torch.tensor(np.array(rewards).flatten()[:1000], dtype=torch.float32).reshape(-1, 1)
+        #dones = torch.tensor(np.array(dones, dtype=bool).flatten()[:1000], dtype=torch.bool)
+
+        trajectory = {
+            "observations": states,
+            "actions": actions,
+            "rewards": rewards,
+            "dones": dones
+        }
+
+        trajectories.append(trajectory)
+
+        print("Collected Trajectory Details:")
+        for key, value in trajectory.items():
+            print(f"{key}: shape={value.shape}, dtype={value.dtype}")
+
+        tuple_trajectories = tuple(trajectories)
+        return tuple_trajectories
+
+
+
+
+
+
+
+'''
+
+Collected Trajectory Output:
+    observations: shape=(1000, 17), dtype=float32
+    actions: shape=(1000, 6), dtype=float32
+    rewards: shape=(1000, 1), dtype=float32
+    dones: shape=(1000, ), dtype=bool
+    Mismatch in lengths after slicing. len: 20, act_len: 1, si: 499
+
+ODT Trajectory Input:
+
+     Original observations shape: (1000, 17)
+     Original actions shape: (1000, 6)
+     Original rewards shape: (1000,)
+     Original dones shape: Not available
+     After slicing. tlen: 20, act_len: 20, si: Anynumber
+
+
+'''
 
 log = logging.getLogger(__name__)
+
+
 
 def main():
     cfg = Config()
@@ -941,17 +1023,17 @@ def main():
         "ordering": 0,
         "eval_rtg": 3600,
         "init_temperature": 0.1,
-        "batch_size": 8, #changed from 256
+        "batch_size": 2, #changed from 256
         "num_eval_episodes": 10,
         "eval_context_length": 5,
         "max_pretrain_iters": 1,
         "weight_decay": 5e-4,
-        "warmup_steps": 10000, #changed from 10000
-        "num_updates_per_pretrain_iter": 500, #changed from 5000
+        "warmup_steps": 100, #changed from 10000
+        "num_updates_per_pretrain_iter": 50, #changed from 5000
         "max_online_iters": 1500,
         "online_rtg": 7200,
         "num_online_rollouts": 1,
-        "replay_size": 1000,
+        "replay_size": 100, #1000
         "num_updates_per_online_iter": 300,
         "eval_interval": 10,
         "device": "cuda",
