@@ -38,7 +38,6 @@ from visual_control.utils import Timer
 import pickle as pkl
 from lib.utils import seed_torch, make_env, make_eval_env, mask_env_state, VideoRecorder, makedirs
 
-from trajectory_collector import TrajectoryCollector as collector
 
 MAX_EPISODE_LEN = 1000
 
@@ -216,7 +215,6 @@ class Workspace:
             self.video_recorder = VideoRecorder(self.work_dir if cfg.video else None)
             makedirs(self.video_dir)
 
-        self.collector = collector()
 
         ### Online Decision Transformer
 
@@ -759,7 +757,7 @@ class Workspace:
                         evaluation = False
                     
                     self.evaluate_dreamer(eval_env)
-                    dreamer_trajectories = self.collect_trajectories(train_env, self.agent, self.collector)
+                    dreamer_trajectories = self.collect_trajectories(train_env, self.agent)
                     
                     self.replay_buffer_odt.add_new_trajs(dreamer_trajectories)
                     train_outputs = trainer.train_iteration(
@@ -872,7 +870,7 @@ class Workspace:
 
     def evaluate_dreamer(self, eval_env):
 
-        
+        self.get_dreamer_state, self.get_dreamer_action, self.get_dreamer_reward, self.get_dreamer_done = [], [], [], []
         lengths_ls = []
         episode_reward_ls = []
         self.agent.eval()
@@ -942,7 +940,7 @@ class Workspace:
     
 
 
-    def collect_trajectories(self, env, agent, collector):
+    def collect_trajectories(self, env, agent):
         trajectories = []
         done = False
         states, actions, rewards, dones = [], [], [], []
