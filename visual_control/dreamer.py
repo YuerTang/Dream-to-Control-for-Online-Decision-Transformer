@@ -29,11 +29,8 @@ class Dreamer(nn.Module):
         self.actdim = action_space.n if hasattr(action_space, 'n') else action_space.shape[0]
         self.cfg = cfg
         self.metrics = collections.defaultdict(AverageMeter)
-        self.get_return_action = None
-        self.build_model()
-
-        # Initialize loss storage
         self.last_model_loss = None
+        self.build_model()
 
     def build_model(self):
         cnn_act = act_dict[self.cfg.cnn_act]
@@ -101,8 +98,6 @@ class Dreamer(nn.Module):
         div = kl_divergence(post_dist, prior_dist).mean(dim=[0, 1])
         div = torch.clamp(div, min=self.cfg.free_nats)  # in case of prior = posterior => kl = 0
         model_loss = self.cfg.kl_scale * div - sum(likes.values())
-
-        self.last_model_loss = model_loss
 
         # Actor loss
         with freeze(nn.ModuleList([self.model_modules, self.value])):
@@ -173,7 +168,6 @@ class Dreamer(nn.Module):
         if log_video:
             self.image_summaries(data, embed, image_pred, video_path)
 
-
     @torch.no_grad()
     def scalar_summaries(
           self, data, feat, prior_dist, post_dist, likes, div,
@@ -218,42 +212,13 @@ class Dreamer(nn.Module):
         openl = openl.permute(1, 3, 0, 4, 2).reshape(T, 3 * H, B * W, C).cpu().numpy()
         openl = (openl * 255.).astype(np.uint8)
         imageio.mimsave(video_path, openl, fps=30)
-    
+
     def preprocess_batch(self, data: Dict[str, Tensor]):
-        
         data = {k: torch.as_tensor(v, device=self.cfg.device, dtype=torch.float) for k, v in data.items()}
         data['image'] = data['image'] / 255.0 - 0.5
-        #clip_rewards = dict(none=lambda x: x, tanh=torch.tanh)[self.cfg.clip_rewards]
-        #data['reward'] = clip_rewards(data['reward'])
-        #return data
-        if 'reward' not in data:
-            print("Warning: No Reward in Preprocess batched. Operation Skipped.")
-            data['reward'] = torch.zeros(size=(data['image'].shape[0],), device=self.cfg.device)  # Assuming batch size is the first dimension
         clip_rewards = dict(none=lambda x: x, tanh=torch.tanh)[self.cfg.clip_rewards]
         data['reward'] = clip_rewards(data['reward'])
         return data
-    
-    '''
-    def preprocess_batch(self, data: Dict[str, Tensor]):
-        # Check if 'reward' is missing in the data.
-        if 'reward' not in data:
-            print("reward not in data, Preprocess_batch Method Skipped")
-            return data  # Return the data unchanged if there is no reward.
-
-        # Convert all input data to tensors with specified type and device.
-        data = {k: torch.as_tensor(v, device=self.cfg.device, dtype=torch.float) for k, v in data.items()}
-        
-        data = {k: v.half() for k, v in data.items()}  # Convert to half precision
-        data['image'] = data['image'] / 255.0 - 0.5
-            
-        # Apply the specified clipping function to 'reward'.
-        clip_rewards = dict(none=lambda x: x, tanh=torch.tanh)[self.cfg.clip_rewards]
-        data['reward'] = clip_rewards(data['reward'])
-        
-        return data
-    '''
-    
-
 
     def preprocess_observation(self, obs: Dict[str, np.ndarray]):
         obs = torch.as_tensor(obs, device=self.cfg.device, dtype=torch.float)
@@ -261,10 +226,6 @@ class Dreamer(nn.Module):
         return obs
 
     @torch.no_grad()
-    #def get_action(self, obs: Dict[str, np.ndarray], training: bool, state: Optional[Tensor] = None) \
-    #        -> Tuple[np.ndarray, Optional[Tensor]]:
-    # Your method implementation here
-
     def get_action(self, obs: Dict[str, np.ndarray], state: Optional[Tensor] = None, training: bool = True) \
             -> Tuple[np.ndarray, Optional[Tensor]]:
         """
@@ -278,17 +239,10 @@ class Dreamer(nn.Module):
         """
         # Add T and B dimension for a single action
         obs = obs[None, None, ...]
+
         action, state = self.policy(obs, state, training)  #self.action_space.sample(),None
         action = action.squeeze(axis=0)
-
-        self.get_return_action = action
         return action, state
-    
-    def get_returned_action(self):
-        """
-        Returns the most recently computed losses without re-running the update.
-        """
-        return self.get_return_action
 
     def policy(self, obs: Tensor, state: Tensor, training: bool) -> Tensor:
         """
@@ -418,7 +372,6 @@ class Dreamer(nn.Module):
         self.model_modules.eval()
         self.value.eval()
         self.actor.eval()
-
     def get_last_losses(self):
         """
         Returns the most recently computed losses without re-running the update.
