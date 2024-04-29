@@ -419,72 +419,7 @@ class Workspace:
             "aug_traj/length": np.mean(lengths),
         }
 
-    def pretrain(self, eval_envs, loss_fn):
-        print("\n\n\n*** Pretrain ***")
-
-        eval_fns = [
-            create_vec_eval_episodes_fn(
-                vec_env=eval_envs,
-                eval_rtg=self.variant["eval_rtg"],
-                state_dim=self.state_dim,
-                act_dim=self.act_dim,
-                state_mean=self.state_mean,
-                state_std=self.state_std,
-                device=self.device,
-                use_mean=True,
-                reward_scale=self.reward_scale,
-            )
-        ]
-
-        trainer = SequenceTrainer(
-            model=self.model,
-            optimizer=self.optimizer,
-            log_temperature_optimizer=self.log_temperature_optimizer,
-            scheduler=self.scheduler,
-            device=self.device,
-        )
-
-        writer = (
-            SummaryWriter(self.logger.log_path) if self.variant["log_to_tb"] else None
-        )
-        while self.pretrain_iter < self.variant["max_pretrain_iters"]:
-            # in every iteration, prepare the data loader
-            dataloader = create_dataloader(
-                trajectories=self.offline_trajs,
-                num_iters=self.variant["num_updates_per_pretrain_iter"],
-                batch_size=self.variant["batch_size"],
-                max_len=self.variant["K"],
-                state_dim=self.state_dim,
-                act_dim=self.act_dim,
-                state_mean=self.state_mean,
-                state_std=self.state_std,
-                reward_scale=self.reward_scale,
-                action_range=self.action_range,
-            )
-
-            train_outputs = trainer.train_iteration(
-                loss_fn=loss_fn,
-                dataloader=dataloader,
-            )
-            eval_outputs, eval_reward = self.evaluate_odt(eval_fns)
-            outputs = {"time/total": time.time() - self.start_time}
-            outputs.update(train_outputs)
-            outputs.update(eval_outputs)
-            self.logger.log_metrics(
-                outputs,
-                iter_num=self.pretrain_iter,
-                total_transitions_sampled=self.total_transitions_sampled,
-                writer=writer,
-            )
-
-            self._save_model(
-                path_prefix=self.logger.log_path,
-                is_pretrain_model=True,
-            )
-
-            self.pretrain_iter += 1
-        
-       
+   
 
     def evaluate_odt(self, eval_fns):
         eval_start = time.time()
@@ -630,10 +565,9 @@ class Workspace:
         )
 
         self.start_time = time.time()
-        if self.variant["max_pretrain_iters"]:
-            self.pretrain(eval_envs, loss_fn)
+        #if self.variant["max_pretrain_iters"]:
+            #self.pretrain(eval_envs, loss_fn)
 
-        print("Pretrained Finished!")
         
 
         # Main Loop for Dreamer
@@ -1016,17 +950,17 @@ def main():
         "ordering": 0,
         "eval_rtg": 3600,
         "init_temperature": 0.1,
-        "batch_size": 2, #changed from 256
+        "batch_size": 8, #changed from 256 to 8
         "num_eval_episodes": 10,
         "eval_context_length": 5,
         "max_pretrain_iters": 1,
         "weight_decay": 5e-4,
         "warmup_steps": 100, #changed from 10000
-        "num_updates_per_pretrain_iter": 50, #changed from 5000
+        "num_updates_per_pretrain_iter": 50, #changed from 5000 to 50
         "max_online_iters": 1500,
         "online_rtg": 7200,
         "num_online_rollouts": 1,
-        "replay_size": 100, #1000
+        "replay_size": 100, #1000 to 100
         "num_updates_per_online_iter": 300,
         "eval_interval": 10,
         "device": "cuda",
