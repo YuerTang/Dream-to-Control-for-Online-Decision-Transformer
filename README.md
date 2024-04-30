@@ -11,15 +11,8 @@ pip install -r pip.txt
 
 ## Start
 
-Download the Decision Transformer dataset:
-```bash
-cd data
-python data.py
-```
-
 To run Dream to Control for Online Decision Transformer:
 ```bash
-cd ../
 python main.py
 ```
 
