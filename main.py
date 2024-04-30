@@ -111,8 +111,8 @@ class Config:
     learning_rate: float = 1e-4
     weight_decay: float = 5e-4
     warmup_steps: int = 10000
-    max_pretrain_iters: int = 1000
-    num_updates_per_pretrain_iter: int = 500
+    #max_pretrain_iters: int = 1000
+    #num_updates_per_pretrain_iter: int = 500
     max_online_iters: int = 1500
     online_rtg: int = 7200
     num_online_rollouts: int = 1
@@ -219,11 +219,13 @@ class Workspace:
         ### Online Decision Transformer
 
         self.state_dim, self.act_dim, self.action_range = self._get_env_spec(variant)
-        self.offline_trajs, self.state_mean, self.state_std = self._load_dataset(
-            variant["env"]
-        )
+        
+        self.state_mean = np.random.rand((self.state_dim)) #, dtype=np.float64) # torch.empty((17, 1), dtype=torch.float64).to(device=self.device)
+
+        self.state_std = np.random.rand((self.state_dim)) #, dtype=np.float64) #torch.empty((17, 1), dtype=torch.float64).to(device=self.device)
+
         # initialize by offline trajs
-        self.replay_buffer_odt = ReplayBuffer(variant["replay_size"], self.offline_trajs)
+        self.replay_buffer_odt = ReplayBuffer(variant["replay_size"]) #, self.offline_trajs)
 
         #self.replay_buffer_odt.print_details()
 
@@ -318,65 +320,7 @@ class Workspace:
                 torch.save(to_save, f)
             print(f"Model saved at {path_prefix}/pretrain_model.pt")
 
-    def _load_model(self, path_prefix):
-        if Path(f"{path_prefix}/model.pt").exists():
-            with open(f"{path_prefix}/model.pt", "rb") as f:
-                checkpoint = torch.load(f)
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-            self.log_temperature_optimizer.load_state_dict(
-                checkpoint["log_temperature_optimizer_state_dict"]
-            )
-            self.pretrain_iter = checkpoint["pretrain_iter"]
-            self.online_iter = checkpoint["online_iter"]
-            self.total_transitions_sampled = checkpoint["total_transitions_sampled"]
-            np.random.set_state(checkpoint["np"])
-            random.setstate(checkpoint["python"])
-            torch.set_rng_state(checkpoint["pytorch"])
-            print(f"Model loaded at {path_prefix}/model.pt")
-
-    def _load_dataset(self, env_name):
-
-        dataset_path = f"./data/{env_name}.pkl"
-        with open(dataset_path, "rb") as f:
-            trajectories = pickle.load(f)
-
-        states, traj_lens, returns = [], [], []
-        for path in trajectories:
-            states.append(path["observations"])
-            traj_lens.append(len(path["observations"]))
-            returns.append(path["rewards"].sum())
-
-        #print(states[:5])
-        traj_lens, returns = np.array(traj_lens), np.array(returns)
-
-        # used for input normalization
-        states = np.concatenate(states, axis=0)
-        state_mean, state_std = np.mean(states, axis=0), np.std(states, axis=0) + 1e-6
-        num_timesteps = sum(traj_lens)
-
-        print("=" * 50)
-        print(f"Starting new experiment: {env_name}")
-        print(f"{len(traj_lens)} trajectories, {num_timesteps} timesteps found")
-        print(f"Average return: {np.mean(returns):.2f}, std: {np.std(returns):.2f}")
-        print(f"Max return: {np.max(returns):.2f}, min: {np.min(returns):.2f}")
-        print(f"Average length: {np.mean(traj_lens):.2f}, std: {np.std(traj_lens):.2f}")
-        print(f"Max length: {np.max(traj_lens):.2f}, min: {np.min(traj_lens):.2f}")
-        print("=" * 50)
-
-        sorted_inds = np.argsort(returns)  # lowest to highest
-        num_trajectories = 1
-        timesteps = traj_lens[sorted_inds[-1]]
-        ind = len(trajectories) - 2
-        while ind >= 0 and timesteps + traj_lens[sorted_inds[ind]] < num_timesteps:
-            timesteps += traj_lens[sorted_inds[ind]]
-            num_trajectories += 1
-            ind -= 1
-        sorted_inds = sorted_inds[-num_trajectories:]
-        trajectories = [trajectories[ii] for ii in sorted_inds]
-
-        return trajectories, state_mean, state_std
+    
 
     def _augment_trajectories(
         self,
@@ -391,8 +335,6 @@ class Workspace:
         with torch.no_grad():
             # generate init state
             target_return = [target_explore * self.reward_scale] * online_envs.num_envs
-
-
             
             returns, lengths, trajs = vec_evaluate_episode_rtg(
                 online_envs,
@@ -449,42 +391,17 @@ class Workspace:
             attention_mask,
             entropy_reg,
         ):
-            dreamer_model_loss = self.agent.get_last_losses()
+            log_likelihood = a_hat_dist.log_likelihood(a)[attention_mask > 0].mean()
 
-            if dreamer_model_loss is None:
-                log_likelihood = a_hat_dist.log_likelihood(a)[attention_mask > 0].mean()
+            entropy = a_hat_dist.entropy().mean()
+            loss = -(log_likelihood + entropy_reg * entropy) 
 
-                entropy = a_hat_dist.entropy().mean()
-                loss = -(log_likelihood + entropy_reg * entropy) 
-
-                return (
-                    loss,
-                    -log_likelihood,
-                    entropy,
-                )
-                
-            else: 
-                
-                dreamer_model_loss = dreamer_model_loss.detach()  # Detach from graph
-                log_likelihood = a_hat_dist.log_likelihood(a)[attention_mask > 0].mean()
-
-                entropy = a_hat_dist.entropy().mean()
-                # Incorporate the model loss from Dreamer
-                loss = -(log_likelihood + entropy_reg * entropy)# + dreamer_model_loss) 
-
-                return (
-                    loss,
-                    -log_likelihood,
-                    entropy,
-                )
-
-
-
-
-
-
-
-
+            return (
+                loss,
+                -log_likelihood,
+                entropy,
+            )
+        
         def get_env_builder(seed, env_name, target_goal=None):
             def make_env_fn():
                 import d4rl
@@ -910,28 +827,7 @@ class Workspace:
         return tuple_trajectories
 
 
-'''
-
-Collected Trajectory Output:
-    observations: shape=(1000, 17), dtype=float32
-    actions: shape=(1000, 6), dtype=float32
-    rewards: shape=(1000, 1), dtype=float32
-    dones: shape=(1000, ), dtype=bool
-    Mismatch in lengths after slicing. len: 20, act_len: 1, si: 499
-
-ODT Trajectory Input:
-
-     Original observations shape: (1000, 17)
-     Original actions shape: (1000, 6)
-     Original rewards shape: (1000,)
-     Original dones shape: Not available
-     After slicing. tlen: 20, act_len: 20, si: Anynumber
-
-
-'''
-
 log = logging.getLogger(__name__)
-
 
 
 def main():
