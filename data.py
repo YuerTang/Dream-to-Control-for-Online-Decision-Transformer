@@ -1,10 +1,3 @@
-"""
-Copyright (c) Meta Platforms, Inc. and affiliates.
-
-This source code is licensed under the CC BY-NC license found in the
-LICENSE.md file in the root directory of this source tree.
-"""
-
 import torch
 import numpy as np
 import random
@@ -68,8 +61,17 @@ class TransformSamplingSubTraj:
         # the user defined action range.
         self.action_range = action_range
 
+
     def __call__(self, traj):
         si = random.randint(0, traj["rewards"].shape[0] - 1)
+
+        # Print the index and original shapes
+        #print(f"Sampling index: {si}")
+        #print(f"Original observations shape: {traj['observations'].shape}")
+        #print(f"Original actions shape: {traj['actions'].shape}")
+        #print(f"Original rewards shape: {traj['rewards'].shape} {traj['rewards'].dtype}")
+        #print(f"Original dones shape: {traj.get('dones', []).shape if 'dones' in traj else 'Not available'}")
+
 
         # get sequences from dataset
         ss = traj["observations"][si : si + self.max_len].reshape(-1, self.state_dim)
@@ -80,6 +82,10 @@ class TransformSamplingSubTraj:
         else:
             dd = traj["dones"][si : si + self.max_len]  # .reshape(-1)
 
+        #print(dd)
+
+
+        
         # get the total length of a trajectory
         tlen = ss.shape[0]
 
@@ -97,8 +103,16 @@ class TransformSamplingSubTraj:
 
         # padding and state + reward normalization
         act_len = aa.shape[0]
+
+
+        
+
+        #print(f"After slicing. tlen: {tlen}, act_len: {act_len}, si: {si}")
         if tlen != act_len:
+            print(f"Error: Mismatch in lengths after slicing. tlen: {tlen}, act_len: {act_len}, si: {si}")
             raise ValueError
+        
+        
 
         ss = np.concatenate([np.zeros((self.max_len - tlen, self.state_dim)), ss])
         ss = (ss - self.state_mean) / self.state_std
@@ -110,6 +124,7 @@ class TransformSamplingSubTraj:
             np.concatenate([np.zeros((self.max_len - tlen, 1)), rtg])
             * self.reward_scale
         )
+
         timesteps = np.concatenate([np.zeros((self.max_len - tlen)), timesteps])
         ordering = np.concatenate([np.zeros((self.max_len - tlen)), ordering])
         padding_mask = np.concatenate([np.zeros(self.max_len - tlen), np.ones(tlen)])
@@ -122,6 +137,8 @@ class TransformSamplingSubTraj:
         timesteps = torch.from_numpy(timesteps).to(dtype=torch.long)
         ordering = torch.from_numpy(ordering).to(dtype=torch.long)
         padding_mask = torch.from_numpy(padding_mask)
+
+        
 
         return ss, aa, rr, dd, rtg, timesteps, ordering, padding_mask
 
@@ -137,7 +154,7 @@ def create_dataloader(
     state_std,
     reward_scale,
     action_range,
-    num_workers=24,
+    num_workers= 24, #24,
 ):
     # total number of subt-rajectories you need to sample
     sample_size = batch_size * num_iters
