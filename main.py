@@ -39,7 +39,7 @@ import pickle as pkl
 from lib.utils import seed_torch, make_env, make_eval_env, mask_env_state, VideoRecorder, makedirs
 
 
-MAX_EPISODE_LEN = 1000
+MAX_EPISODE_LEN = 500
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class Config:
     wandb: bool = False
     from_pixels: bool = True
     pixels_width: int = 64
-    action_repeat: int = 1 #2
+    action_repeat: int = 2#2
     batch_size: int = 50
     batch_length: int = 50
     train_steps: int = 100
@@ -127,7 +127,7 @@ class Config:
     cpus_per_task: int = 10
     gpus_per_node: int = 1
     max_num_timeout: int = 100000
-    timeout_min: int = 4319
+    timeout_min: int = 10000 #4319 
 
     # Additional model specifics
     log_every: int = 1000
@@ -220,12 +220,20 @@ class Workspace:
 
         self.state_dim, self.act_dim, self.action_range = self._get_env_spec(variant)
         
-        self.state_mean = np.random.rand((self.state_dim)) #, dtype=np.float64) # torch.empty((17, 1), dtype=torch.float64).to(device=self.device)
+        #self.state_mean = np.random.rand((self.state_dim)) #, dtype=np.float64) # torch.empty((17, 1), dtype=torch.float64).to(device=self.device)
 
-        self.state_std = np.random.rand((self.state_dim)) #, dtype=np.float64) #torch.empty((17, 1), dtype=torch.float64).to(device=self.device)
+        #self.state_std = np.random.rand((self.state_dim)) #, dtype=np.float64) #torch.empty((17, 1), dtype=torch.float64).to(device=self.device)
 
+        
+        #self.offline_trajs, 
+        self.offline_trajs, self.state_mean, self.state_std = self._load_dataset(
+            variant["env"]
+        )
         # initialize by offline trajs
-        self.replay_buffer_odt = ReplayBuffer(variant["replay_size"]) #, self.offline_trajs)
+        self.replay_buffer_odt = ReplayBuffer(variant["replay_size"] , self.offline_trajs)
+        
+        #self.replay_buffer_odt = ReplayBuffer(variant["replay_size"] , self.offline_trajs)
+
 
         #self.replay_buffer_odt.print_details()
 
@@ -344,8 +352,8 @@ class Workspace:
                 max_ep_len=max_ep_len,
                 reward_scale=self.reward_scale,
                 target_return=target_return,
-                mode="normal",
-                state_mean=self.state_mean,
+                mode="normal", 
+                state_mean=self.state_mean, 
                 state_std=self.state_std,
                 device=self.device,
                 use_mean=False,
@@ -362,6 +370,49 @@ class Workspace:
         }
 
    
+    def _load_dataset(self, env_name):
+
+        dataset_path = f"./data/{env_name}.pkl"
+        with open(dataset_path, "rb") as f:
+            trajectories = pickle.load(f)
+
+        states, traj_lens, returns = [], [], []
+        for path in trajectories:
+            states.append(path["observations"])
+            traj_lens.append(len(path["observations"]))
+            returns.append(path["rewards"].sum())
+
+        #print(states[:5])
+        traj_lens, returns = np.array(traj_lens), np.array(returns)
+
+        # used for input normalization
+        states = np.concatenate(states, axis=0)
+        state_mean, state_std = np.mean(states, axis=0), np.std(states, axis=0) + 1e-6
+        num_timesteps = sum(traj_lens)
+
+        print("=" * 50)
+        print(f"Starting new experiment: {env_name}")
+        print(f"{len(traj_lens)} trajectories, {num_timesteps} timesteps found")
+        print(f"Average return: {np.mean(returns):.2f}, std: {np.std(returns):.2f}")
+        print(f"Max return: {np.max(returns):.2f}, min: {np.min(returns):.2f}")
+        print(f"Average length: {np.mean(traj_lens):.2f}, std: {np.std(traj_lens):.2f}")
+        print(f"Max length: {np.max(traj_lens):.2f}, min: {np.min(traj_lens):.2f}")
+        print("=" * 50)
+
+        sorted_inds = np.argsort(returns)  # lowest to highest
+        num_trajectories = 1
+        timesteps = traj_lens[sorted_inds[-1]]
+        ind = len(trajectories) - 2
+        while ind >= 0 and timesteps + traj_lens[sorted_inds[ind]] < num_timesteps:
+            timesteps += traj_lens[sorted_inds[ind]]
+            num_trajectories += 1
+            ind -= 1
+        sorted_inds = sorted_inds[-num_trajectories:]
+        trajectories = [trajectories[ii] for ii in sorted_inds]
+
+        return trajectories, state_mean, state_std
+        #return state_mean, state_std
+
 
     def evaluate_odt(self, eval_fns):
         eval_start = time.time()
@@ -529,8 +580,8 @@ class Workspace:
                     vec_env=eval_envs,
                     eval_rtg=self.variant["eval_rtg"],
                     state_dim=self.state_dim,
-                    act_dim=self.act_dim,
-                    state_mean=self.state_mean,
+                    act_dim=self.act_dim, 
+                    state_mean=self.state_mean, 
                     state_std=self.state_std,
                     device=self.device,
                     use_mean=True,
@@ -591,8 +642,8 @@ class Workspace:
                         batch_size=self.variant["batch_size"],
                         max_len=self.variant["K"],
                         state_dim=self.state_dim,
-                        act_dim=self.act_dim,
-                        state_mean=self.state_mean,
+                        act_dim=self.act_dim, 
+                        state_mean=self.state_mean, 
                         state_std=self.state_std,
                         reward_scale=self.reward_scale,
                         action_range=self.action_range,
@@ -611,6 +662,7 @@ class Workspace:
                     dreamer_trajectories = self.collect_trajectories(train_env, self.agent)
                     
                     self.replay_buffer_odt.add_new_trajs(dreamer_trajectories)
+                    
                     train_outputs = trainer.train_iteration(
                         loss_fn=loss_fn,
                         dataloader=dataloader,
@@ -798,12 +850,15 @@ class Workspace:
 
 
         numerical_states = [state[0]['mean'].cpu().numpy() for state in self.get_dreamer_state]
-        states = torch.tensor(numerical_states, dtype=torch.float32)
+
+        states = (torch.tensor(numerical_states, dtype=torch.float32).squeeze(1)).numpy()
 
         # Converting list of actions and rewards to tensors
-        actions = torch.tensor(self.get_dreamer_action, dtype=torch.float64)
-        rewards = torch.tensor(self.get_dreamer_reward, dtype=torch.float32)
-        dones = torch.tensor(self.get_dreamer_done, dtype=torch.bool)
+        actions = (torch.tensor(self.get_dreamer_action, dtype=torch.float64)).numpy()
+
+        rewards = (torch.tensor(self.get_dreamer_reward, dtype=torch.float32)).numpy()
+
+        dones = (torch.tensor(self.get_dreamer_done, dtype=torch.bool)).numpy()
 
         trajectory = {
             "observations": states,
@@ -815,10 +870,10 @@ class Workspace:
         trajectories.append(trajectory)
 
         # Printing the shapes of the tensors
-        print("Shape of states tensor:", states.shape)
-        print("Shape of actions tensor:", actions.shape)
-        print("Shape of rewards tensor:", rewards.shape)
-        print("Shape of dones tensor:", dones.shape)
+        print("Shape of states :", states.shape)
+        print("Shape of actions :", actions.shape)
+        print("Shape of rewards :", rewards.shape)
+        print("Shape of dones :", dones.shape)
 
 
         self.get_dreamer_state, self.get_dreamer_action, self.get_dreamer_reward, self.get_dreamer_done = [], [], [], []
@@ -846,17 +901,17 @@ def main():
         "ordering": 0,
         "eval_rtg": 3600,
         "init_temperature": 0.1,
-        "batch_size": 8, #changed from 256 to 8
+        "batch_size": 256, #changed from 256 to 8
         "num_eval_episodes": 10,
         "eval_context_length": 5,
         "max_pretrain_iters": 1,
         "weight_decay": 5e-4,
-        "warmup_steps": 100, #changed from 10000
-        "num_updates_per_pretrain_iter": 50, #changed from 5000 to 50
+        "warmup_steps": 1000, #changed from 10000
+        "num_updates_per_pretrain_iter": 5000, #changed from 5000 to 50
         "max_online_iters": 1500,
         "online_rtg": 7200,
         "num_online_rollouts": 1,
-        "replay_size": 100, #1000 to 100
+        "replay_size": 1000, #1000 to 100
         "num_updates_per_online_iter": 300,
         "eval_interval": 10,
         "device": "cuda",
