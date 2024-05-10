@@ -619,7 +619,7 @@ class Workspace:
                     if (self.online_iter + 1) % self.variant[
                         "eval_interval"
                     ] == 0 or is_last_iter:
-                        evaluation = True
+                        evaluation = False #True
                     else:
                         evaluation = False
                     
