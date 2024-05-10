@@ -1,9 +1,4 @@
-"""
-Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This source code is licensed under the CC BY-NC license found in the
-LICENSE.md file in the root directory of this source tree.
-"""
 
 import numpy as np
 import torch
@@ -15,8 +10,8 @@ def create_vec_eval_episodes_fn(
     vec_env,
     eval_rtg,
     state_dim,
-    act_dim,
-    state_mean,
+    act_dim, 
+    state_mean, 
     state_std,
     device,
     use_mean=False,
@@ -32,8 +27,8 @@ def create_vec_eval_episodes_fn(
             max_ep_len=MAX_EPISODE_LEN,
             reward_scale=reward_scale,
             target_return=target_return,
-            mode="normal",
-            state_mean=state_mean,
+            mode="normal", 
+            state_mean=state_mean, 
             state_std=state_std,
             device=device,
             use_mean=use_mean,
@@ -69,19 +64,37 @@ def vec_evaluate_episode_rtg(
     model.eval()
     model.to(device=device)
 
+
     state_mean = torch.from_numpy(state_mean).to(device=device)
     state_std = torch.from_numpy(state_std).to(device=device)
-
+    
     num_envs = vec_env.num_envs
+
     state = vec_env.reset()
+
+    
 
     # we keep all the histories on the device
     # note that the latest action and reward will be "padding"
+
+
+    
     states = (
         torch.from_numpy(state)
         .reshape(num_envs, state_dim)
         .to(device=device, dtype=torch.float32)
     ).reshape(num_envs, -1, state_dim)
+
+
+    #state_mean = torch.mean(states, dim=0).to(device=device)
+    #print("state_mean:")
+    #print(state_mean)
+    #state_std = (torch.std(states) + 1e-6).to(device=device)
+    #print("state_std:")
+    #print(state_std)
+    #state_std = torch.where(state_std > 1e-6, state_std, torch.tensor(1.0, device=device))
+    #print(state_std)
+
     actions = torch.zeros(0, device=device, dtype=torch.float32)
     rewards = torch.zeros(0, device=device, dtype=torch.float32)
 
